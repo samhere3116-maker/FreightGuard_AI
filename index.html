@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cold-chain reroute desk</title>
+<style>
+:root{
+  --bg:#f2f6f7; --panel:#ffffff; --ink:#12303f; --muted:#5b7380; --line:#d3dfe3;
+  --accent:#0e7c86; --accent-ink:#ffffff; --warn:#a86a0a; --bad:#b3261e; --ok:#1d7a4a;
+  --tide:#cfe6e9;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#0f1c23; --panel:#16272f; --ink:#e3eef1; --muted:#8fa7b2; --line:#29414c;
+    --accent:#3cc3cf; --accent-ink:#06242a; --warn:#e0a53a; --bad:#ff8a80; --ok:#6fd49b;
+    --tide:#1f4650; color-scheme: dark; }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:16px/1.5 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif;
+  padding:24px 16px 48px}
+main{max-width:860px;margin:0 auto}
+h1{font-size:1.6rem;margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:var(--muted);margin:0 0 24px;max-width:60ch}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px;margin-bottom:16px}
+h2{font-size:1.05rem;margin:0 0 14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
+label{display:block;font-size:.88rem;color:var(--muted);margin-bottom:4px}
+input[type=text],input[type=number]{width:100%;padding:9px 10px;border:1px solid var(--line);
+  border-radius:6px;background:var(--bg);color:var(--ink);font:inherit}
+input:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.hint{font-size:.8rem;color:var(--muted);margin-top:4px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:16px}
+button{font:inherit;font-weight:600;padding:10px 18px;border-radius:6px;border:1px solid var(--accent);
+  background:var(--accent);color:var(--accent-ink);cursor:pointer}
+button.ghost{background:transparent;color:var(--ink);border-color:var(--line)}
+button.danger{background:transparent;color:var(--bad);border-color:var(--bad)}
+button:disabled{opacity:.5;cursor:wait}
+.opts{display:flex;gap:16px;flex-wrap:wrap;margin-top:14px;font-size:.85rem;color:var(--muted)}
+.opts input[type=text]{width:240px}
+.opts label{display:flex;gap:6px;align-items:center;margin:0}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}
+.fact b{display:block;font-size:1.3rem}
+.fact span{font-size:.82rem;color:var(--muted)}
+.tag{display:inline-block;padding:2px 8px;border-radius:99px;border:1px solid var(--line);font-size:.8rem}
+.tag.warn{color:var(--warn);border-color:var(--warn)}
+.tag.bad{color:var(--bad);border-color:var(--bad)}
+.tag.ok{color:var(--ok);border-color:var(--ok)}
+.line{position:relative;height:56px;margin:8px 0 26px}
+.tide{position:absolute;left:0;right:0;top:22px;height:12px;border-radius:6px;background:var(--tide)}
+.tick{position:absolute;top:8px;width:2px;height:40px;background:var(--accent)}
+.tick.best{width:4px;background:var(--ink)}
+.tick span{position:absolute;top:44px;left:-40px;width:82px;text-align:center;font-size:.72rem;color:var(--muted)}
+.axis{display:flex;justify-content:space-between;font-size:.78rem;color:var(--muted);margin-top:-14px}
+table{width:100%;border-collapse:collapse;font-size:.93rem}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-weight:600;font-size:.82rem}
+tr.best td{font-weight:600}
+.decision{border-left:4px solid var(--accent);padding-left:14px}
+.decision.manual{border-color:var(--bad)}
+#msg{margin-top:12px;font-weight:600}
+.err{color:var(--bad)}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+  <h1>Cold-chain reroute desk</h1>
+  <p class="sub">AI proposes reroute ports for a container in trouble. Rules remove illegal and unreachable options. You make the final call.</p>
+
+  <section>
+    <h2>Container details</h2>
+    <div class="grid">
+      <div><label for="cid">Container ID</label><input id="cid" type="text" value="CNT-4821"></div>
+      <div><label for="cargo">Cargo</label><input id="cargo" type="text" value="frozen fish"></div>
+      <div><label for="life">Base shelf life (days)</label><input id="life" type="number" min="1" value="10"></div>
+      <div><label for="transit">Hours in transit so far</label><input id="transit" type="number" min="0" value="100"></div>
+    </div>
+    <div style="margin-top:14px">
+      <label for="temps">Temperature readings in °C</label>
+      <input id="temps" type="text" value="8, 9, 10">
+      <div class="hint">Separate with commas. Leave empty to simulate a sensor blackout.</div>
+    </div>
+    <div class="row">
+      <button id="go">Analyze container</button>
+      <span id="status" class="hint" role="status"></span>
+    </div>
+    <div class="opts">
+      <label>n8n address <input id="base" type="text" value="http://localhost:5678"></label>
+      <label><input id="testmode" type="checkbox" checked> Test mode (click Listen in n8n before each call)</label>
+    </div>
+  </section>
+
+  <section id="result" hidden>
+    <h2>AI proposal after rule checks</h2>
+    <div class="facts">
+      <div class="fact"><b id="f-life"></b><span>shelf life remaining (hours)</span></div>
+      <div class="fact"><b id="f-sensor"></b><span>sensor status</span></div>
+      <div class="fact"><b id="f-ai"></b><span>option source</span></div>
+    </div>
+    <div id="viz"></div>
+    <table id="tbl" hidden>
+      <thead><tr><th>Port</th><th>Extra hours</th><th>Cargo value saved</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="hint" id="note"></p>
+
+    <div id="decision" class="decision" hidden>
+      <h2 id="d-title"></h2>
+      <p id="d-text"></p>
+      <div class="row">
+        <button id="approve">Approve reroute</button>
+        <button id="reject" class="danger">Reject</button>
+      </div>
+    </div>
+    <p id="msg" role="status"></p>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let options = [], idx = 0;
+
+function url(path){
+  const base = $('base').value.replace(/\/+$/,'');
+  return base + ($('testmode').checked ? '/webhook-test/' : '/webhook/') + path;
+}
+function setText(el, t){ el.textContent = t; }
+
+async function post(path, body){
+  const r = await fetch(url(path), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  if(!r.ok) throw new Error('n8n answered ' + r.status + '. In test mode, click Listen for test event first.');
+  const d = await r.json();
+  return Array.isArray(d) ? d[0] : d;
+}
+
+function parseTemps(){
+  return $('temps').value.split(',').map(s => s.trim()).filter(Boolean)
+    .map(Number).filter(n => !Number.isNaN(n)).map(t => ({temp:t, humidity:80}));
+}
+
+$('go').addEventListener('click', async () => {
+  const btn = $('go'); btn.disabled = true;
+  setText($('status'), 'Analyzing. The AI step can take a few seconds.');
+  $('msg').className = ''; setText($('msg'), '');
+  try{
+    const d = await post('analyze', {
+      container_id: $('cid').value,
+      cargo_type: $('cargo').value,
+      base_shelf_life_days: Number($('life').value),
+      current_transit_hours: Number($('transit').value),
+      telemetry_history: parseTemps()
+    });
+    show(d);
+    setText($('status'), '');
+  }catch(e){
+    setText($('status'), '');
+    $('result').hidden = false;
+    $('decision').hidden = true; $('tbl').hidden = true; $('viz').innerHTML = '';
+    $('msg').className = 'err';
+    setText($('msg'), e.message.includes('Failed to fetch')
+      ? 'Could not reach n8n. Check the address, that n8n is running, and that CORS allows this page.' : e.message);
+  }
+  btn.disabled = false;
+});
+
+function show(d){
+  options = d.candidate_options || [];
+  idx = 0;
+  $('result').hidden = false;
+  setText($('f-life'), d.remaining_shelf_life_hours);
+  setText($('f-sensor'), d.sensor_status === 'ONLINE' ? 'Online' : 'Blackout (assumed worst case)');
+  setText($('f-ai'), d.ai_status === 'AI_PROPOSED' ? 'AI proposed' : 'Standard options (AI unavailable)');
+  setText($('note'), d.gate_note || '');
+  drawViz(Number(d.remaining_shelf_life_hours));
+  renderOption();
+}
+
+function drawViz(remaining){
+  const viz = $('viz'); viz.innerHTML = '';
+  const maxExtra = Math.max(0, ...options.map(o => Number(o.extra_hours)));
+  const scale = Math.max(remaining, maxExtra) * 1.05 || 1;
+  const wrap = document.createElement('div'); wrap.className = 'line';
+  const tide = document.createElement('div'); tide.className = 'tide';
+  tide.style.right = (100 - Math.min(100, remaining / scale * 100)) + '%';
+  wrap.appendChild(tide);
+  options.forEach((o, i) => {
+    const t = document.createElement('div');
+    t.className = 'tick' + (i === idx ? ' best' : '');
+    t.style.left = (Number(o.extra_hours) / scale * 100) + '%';
+    const s = document.createElement('span');
+    s.textContent = o.port.replace('Port ', '') + ' +' + o.extra_hours + 'h';
+    t.appendChild(s); wrap.appendChild(t);
+  });
+  viz.appendChild(wrap);
+  const ax = document.createElement('div'); ax.className = 'axis';
+  ax.innerHTML = '<span>Now</span>';
+  const end = document.createElement('span');
+  end.textContent = 'Spoils after ' + remaining + 'h';
+  ax.appendChild(end); viz.appendChild(ax);
+}
+
+function renderOption(){
+  const tbody = $('tbl').querySelector('tbody'); tbody.innerHTML = '';
+  options.forEach((o, i) => {
+    const tr = document.createElement('tr');
+    if(i === idx) tr.className = 'best';
+    [o.port, o.extra_hours + ' h', Math.round(Number(o.salvage_pct) * 100) + '%']
+      .forEach(v => { const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); });
+    tbody.appendChild(tr);
+  });
+  $('tbl').hidden = options.length === 0;
+
+  const dec = $('decision'); dec.hidden = false;
+  const manual = idx >= options.length;
+  dec.classList.toggle('manual', manual);
+  $('approve').hidden = manual; $('reject').hidden = manual;
+  if(manual){
+    setText($('d-title'), 'No safe automatic option');
+    setText($('d-text'), 'No legal port can be reached before the cargo spoils. A person must decide how to handle this container.');
+  }else{
+    const o = options[idx];
+    setText($('d-title'), 'Recommended: ' + o.port);
+    setText($('d-text'), 'Arrives ' + o.extra_hours + ' hours later and saves about ' +
+      Math.round(Number(o.salvage_pct) * 100) + '% of the cargo value. The AI cannot confirm this reroute. You decide.');
+  }
+  if(options.length) drawViz(Number($('f-life').textContent));
+}
+
+async function decide(kind){
+  const o = options[idx];
+  $('approve').disabled = $('reject').disabled = true;
+  $('msg').className = '';
+  try{
+    const d = await post('decision', {decision: kind, port: o.port, container_id: $('cid').value});
+    if(kind === 'approve'){
+      setText($('msg'), d.message || 'Reroute approved.');
+      $('approve').hidden = $('reject').hidden = true;
+      setText($('d-title'), 'Approved: ' + o.port);
+    }else{
+      idx += 1;
+      setText($('msg'), d.message || 'Reroute rejected.');
+      renderOption();
+    }
+  }catch(e){
+    $('msg').className = 'err';
+    setText($('msg'), e.message);
+  }
+  $('approve').disabled = $('reject').disabled = false;
+}
+$('approve').addEventListener('click', () => decide('approve'));
+$('reject').addEventListener('click', () => decide('reject'));
+</script>
+</body>
+</html>
