@@ -1,0 +1,288 @@
+{
+  "name": "FREIGHTGUARD AI",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\nlet input = raw.body ?? raw;\nif (typeof input === 'string') input = JSON.parse(input);\n\nconst telemetry = input.telemetry_history || [];\nconst baseHours = Number(input.base_shelf_life_days || 10) * 24;\nconst transitHours = Number(input.current_transit_hours || 0);\n\nlet sensorStatus = \"ONLINE\";\nlet readings = telemetry;\nif (readings.length === 0) {\n  sensorStatus = \"BLACKOUT_DRIFT\";\n  readings = [{ temp: 9.5, humidity: 80.0 }]; // worst-case fallback\n}\n\nconst R = 8.314;\nconst Ea = 65000;\nconst baseKelvin = 277.15; // 4°C target\nconst decayRates = readings.map(r => {\n  const kelvin = Number(r.temp ?? 4.0) + 273.15;\n  return Math.exp((-Ea / R) * ((1 / kelvin) - (1 / baseKelvin)));\n});\nconst avgDecay = decayRates.reduce((a, b) => a + b, 0) / decayRates.length;\n\nconst effectiveSpentHours = transitHours * avgDecay;\nconst remainingHours = Math.max(0, baseHours - effectiveSpentHours);\nconst disruption = remainingHours < 48;\n\nreturn [{\n  json: {\n    ...input,\n    remaining_shelf_life_hours: Math.round(remainingHours * 10) / 10,\n    disruption_detected: disruption,\n    sensor_status: sensorStatus\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        432,
+        0
+      ],
+      "id": "9408e520-96fb-471b-8427-1e39fa45e511",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "jsCode": "const agent = $input.first().json;\nconst upstream = $('Code in JavaScript').first().json;   // must match your Arrhenius node's name exactly\nconst remaining = upstream.remaining_shelf_life_hours;\n\n// standard options, used only if the AI fails or returns broken JSON\nconst fallbackPorts = [\n  { port: \"Port Rotterdam\", extra_hours: 4,  salvage_pct: 0.85 },\n  { port: \"Port Antwerp\",   extra_hours: 6,  salvage_pct: 0.75 },\n  { port: \"Port Hamburg\",   extra_hours: 10, salvage_pct: 0.60 }\n];\n\n// parse the Agent's JSON string output\nlet candidatePorts;\nlet aiStatus = \"AI_PROPOSED\";\ntry {\n  const text = String(agent.output ?? '').replace(/```json|```/g, '').trim();\n  candidatePorts = JSON.parse(text);\n} catch (e) {\n  candidatePorts = fallbackPorts;\n  aiStatus = \"AI_UNAVAILABLE_USING_STANDARD_OPTIONS\";\n}\n\n// legality lookup (matches the real port names the Agent was told to use)\nconst legalityByPort = {\n  \"Port Rotterdam\": true,\n  \"Port Antwerp\": true,\n  \"Port Hamburg\": false   // e.g. import restrictions on this cargo type\n};\n\nconst legalOptions = candidatePorts\n  .map(p => ({ ...p, legal_for_cargo: legalityByPort[p.port] ?? false }))\n  .filter(p => p.legal_for_cargo);\n\nconst viableOptions = legalOptions.filter(\n  p => Number(p.extra_hours) < remaining\n);\n\nconst ranked = viableOptions.sort((a, b) => b.salvage_pct - a.salvage_pct);\n\nreturn [{\n  json: {\n    ...upstream,\n    remaining_shelf_life_hours: remaining,\n    ai_status: aiStatus,\n    candidate_options: ranked,\n    best_option: ranked[0] || null,\n    needs_manual_decision: ranked.length === 0,\n    gate_note: `Filtered ${candidatePorts.length - legalOptions.length} illegal option(s); ${ranked.length} legal+viable option(s) remain.`\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        992,
+        0
+      ],
+      "id": "4068043d-3ce3-476f-b65f-44f23744fccc",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Container {{ $json.container_id }}, cargo: {{ $json.cargo_type }}, remaining shelf life: {{ $json.remaining_shelf_life_hours }} hours, transit so far: {{ $json.current_transit_hours }} hours, sensor status: {{ $json.sensor_status }}. Propose reroutes.",
+        "options": {
+          "systemMessage": "You are a logistics routing analyst for cold-chain cargo in distress.\n\nYou will receive: container_id, cargo_type, remaining_shelf_life_hours, current_transit_hours and sensor_status.\n\nPropose exactly 3 reroute options, one for each of these ports, using these exact names and no others:\n\"Port Rotterdam\", \"Port Hamburg\", \"Port Antwerp\"\n\nFor each port return:\n- port: the exact name above\n- extra_hours: a whole number between 2 and 12, the estimated extra transit time to reach that port\n- salvage_pct: a decimal between 0.60 and 0.95, how much cargo value would likely be saved by rerouting there. Use higher values for ports with shorter extra_hours and lower values for longer ones. If remaining_shelf_life_hours is low, lower the values slightly.\n\nDo NOT check legality or compliance. That happens in a separate step after you.\n\nOutput ONLY a valid JSON array. No markdown, no code fences, no explanation, in exactly this shape:\n[{\"port\": \"Port Rotterdam\", \"extra_hours\": 4, \"salvage_pct\": 0.85}, {\"port\": \"Port Antwerp\", \"extra_hours\": 6, \"salvage_pct\": 0.75}, {\"port\": \"Port Hamburg\", \"extra_hours\": 10, \"salvage_pct\": 0.60}]"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        624,
+        0
+      ],
+      "id": "bc7016cb-41b8-47fe-958c-3d1243313fac",
+      "name": "AI Agent",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        496,
+        208
+      ],
+      "id": "dc9360da-6c23-4320-a669-6daaf43f4368",
+      "name": "Google Gemini Chat Model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "3TuHlPE2CXMXLHKb",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "analyze",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        208,
+        0
+      ],
+      "id": "185824b3-6197-4943-98e0-e5b335e3bdc0",
+      "name": "Webhook",
+      "webhookId": "1448954a-1bf1-45e8-87d7-4f19971aa35d"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1200,
+        0
+      ],
+      "id": "7f81ed04-0106-40d8-8a21-f1032555cb7b",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "decision",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        720,
+        304
+      ],
+      "id": "80b32e84-0ecb-4331-b612-310fea248526",
+      "name": "Webhook1",
+      "webhookId": "92064690-adcd-4fed-b616-cbed156539c4"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "1e21054a-1b25-4f69-a70b-86b8e13d5c3e",
+              "leftValue": "={{ $json.body.decision }}",
+              "rightValue": "approve",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "ignoreCase": true
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        944,
+        256
+      ],
+      "id": "bb9d6f59-b49b-45af-b43b-44c2a96bb845",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "   {\"status\": \"approved\", \"message\": \"Reroute confirmed by human operator\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1232,
+        176
+      ],
+      "id": "9abe0dc1-33ed-49b7-a23f-c95772657a1f",
+      "name": "Respond to Webhook1"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "   {\"status\": \"rejected\", \"message\": \"Reroute rejected. Manual handling required\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1152,
+        352
+      ],
+      "id": "8fd19ab6-bdef-4a45-b400-1bb382cc9b4c",
+      "name": "Respond to Webhook2"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook1": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond to Webhook2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "65a233a2-6b5f-438c-93ca-790748fe7558",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "5f6908030a4859907021b63c581ed18918bcb07cb1e2c611622415deb9c3e932"
+  },
+  "nodeGroups": [],
+  "id": "HugyV70LvRT7zk6q",
+  "tags": []
+}
